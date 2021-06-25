@@ -240,6 +240,9 @@ struct NormalizedFile {
   PackedVersion               compatVersion = 0;  // dylibs only
   PackedVersion               currentVersion = 0; // dylibs only
   bool                        hasUUID = false;
+  // BURST:
+  bool                        isBurst = false;
+  // :BURST
   bool                        hasMinVersionLoadCommand = false;
   bool                        generateDataInCodeLoadCommand = false;
   std::vector<StringRef>      rpaths;

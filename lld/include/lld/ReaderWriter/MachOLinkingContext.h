@@ -108,6 +108,9 @@ public:
   uint32_t getCPUType() const;
   uint32_t getCPUSubType() const;
 
+  // BURST:
+  bool addBurstLoadCommands() const;
+  // :BURST
   bool addEntryPointLoadCommand() const;
   bool addUnixThreadLoadCommand() const;
   bool outputTypeHasEntry() const;
@@ -167,6 +170,10 @@ public:
   void setGenerateVersionLoadCommand(bool v) {
     _generateVersionLoadCommand = v;
   }
+
+// BURST: 
+  void setBurst(bool v) { _burst = v; }
+// :BURST
 
   bool generateFunctionStartsLoadCommand() const {
     return _generateFunctionStartsLoadCommand;
@@ -471,6 +478,9 @@ private:
   StringRef _installName;
   StringRefVector _rpaths;
   bool _flatNamespace = false;
+// BURST: 
+  bool _burst = false;
+// :BURST
   UndefinedMode _undefinedMode = UndefinedMode::error;
   bool _deadStrippableDylib = false;
   bool _printAtoms = false;

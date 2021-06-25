@@ -37,6 +37,11 @@
 #include "llvm/Support/FileOutputBuffer.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/Host.h"
+// BURST:
+#include "llvm/Support/MD5.h"
+#include "llvm/Support/Path.h"
+#include "lld/picosha2.h"           // https://github.com/okdshin/PicoSHA2
+// :BURST
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include <functional>
@@ -144,6 +149,11 @@ private:
   void        buildExportTrie();
   void        computeFunctionStartsSize();
   void        computeDataInCodeSize();
+// BURST:
+  void        computeCodeSignSize();
+  void        writeUUID();
+  void        writeAdHocCodeSign();
+  // :BURST
   void        computeSymbolTableSizes();
   void        buildSectionRelocations();
   void        appendSymbols(const std::vector<Symbol> &symbols,
@@ -186,6 +196,17 @@ private:
   const NormalizedFile &_file;
   std::error_code _ec;
   uint8_t              *_buffer;
+// BURST:
+  uint8_t               _uuidDigest[16];
+  uint8_t              *_uuidCommandLoc;  // We need to update the digest once the image is formed
+  uint32_t              _startOfCodeSign;
+  uint32_t              _sizeOfCodeSign;
+  uint32_t              _signatureSectionSize;
+  uint32_t              _requirementsSize;
+  uint32_t              _signedDataSize;
+  uint64_t              _textSegmentOffset;
+  uint64_t              _textSegmentSize;
+  // :BURST
   const bool            _is64;
   const bool            _swap;
   const bool            _bigEndianArch;
@@ -354,7 +375,15 @@ MachOFileLayout::MachOFileLayout(const NormalizedFile &file,
                   + pointerAlign(_indirectSymbolTableCount * sizeof(uint32_t));
     _endOfSymbolStrings = _startOfSymbolStrings
                           + pointerAlign(_symbolStringPoolSize);
-    _endOfLinkEdit = _endOfSymbolStrings;
+// BURST:
+    if (_file.isBurst) {
+      _startOfCodeSign = llvm::alignTo(_endOfSymbolStrings, 16);
+      computeCodeSignSize(); // needs to know _startOfCodeSign offset
+      _endOfLinkEdit = _startOfCodeSign + _sizeOfCodeSign;
+    } else
+// :BURST
+      _endOfLinkEdit = _endOfSymbolStrings;
+
     DEBUG_WITH_TYPE("MachOFileLayout",
                   llvm::dbgs() << "MachOFileLayout()\n"
       << "  startOfLoadCommands=" << _startOfLoadCommands << "\n"
@@ -460,6 +489,15 @@ uint32_t MachOFileLayout::loadCommandsSize(uint32_t &count,
     size += sizeof(linkedit_data_command);
     ++count;
   }
+
+// BURST:
+  if (_file.isBurst) {
+    size += sizeof(uuid_command);
+    ++count;
+    size += sizeof(codesign_command);
+    ++count;
+  }
+// :BURST
 
   return size;
 }
@@ -572,7 +610,7 @@ void MachOFileLayout::buildFileOffsets() {
 }
 
 size_t MachOFileLayout::size() const {
-  return _endOfSymbolStrings;
+  return _endOfLinkEdit;
 }
 
 void MachOFileLayout::writeMachHeader() {
@@ -693,6 +731,16 @@ llvm::Error MachOFileLayout::writeSegmentLoadCommands(uint8_t *&lc) {
       lc = next;
       continue;
     }
+
+// BURST:
+
+    if (seg.name.equals("__TEXT")) {
+      _textSegmentOffset = segInfo.fileOffset;
+      _textSegmentSize = segInfo.fileSize;
+    }
+
+// :BURST
+
     // Write segment command with trailing sections.
     typename T::command* cmd = reinterpret_cast<typename T::command*>(lc);
     cmd->cmd = T::LC;
@@ -1012,6 +1060,30 @@ llvm::Error MachOFileLayout::writeLoadCommands() {
         swapStruct(*dl);
       lc += sizeof(linkedit_data_command);
     }
+
+// BURST:
+    if (_file.isBurst) {
+      _uuidCommandLoc = lc;
+      uuid_command *uuid = reinterpret_cast<uuid_command *>(lc);
+      uuid->cmd     = LC_UUID;
+      uuid->cmdsize = sizeof(uuid_command);
+      for (int a=0;a<16;a++)
+          uuid->uuid[a] = 0;  // We need to revisit after file complete
+      if (_swap)
+        swapStruct(*uuid);
+      lc += sizeof(uuid_command);
+
+      codesign_command *sign = reinterpret_cast<codesign_command *>(lc);
+      sign->cmd      = LC_CODE_SIGNATURE;
+      sign->cmdsize  = sizeof(codesign_command);
+      sign->dataoff  = _startOfCodeSign;
+      sign->datasize = _sizeOfCodeSign;
+      if (_swap)
+        swapStruct(*sign);
+      lc += sizeof(codesign_command);
+    }
+
+// :BURST
   }
   assert(lc == &_buffer[_endOfLoadCommands]);
   return llvm::Error::success();
@@ -1505,6 +1577,75 @@ void MachOFileLayout::computeDataInCodeSize() {
   _dataInCodeSize = _file.dataInCode.size() * sizeof(data_in_code_entry);
 }
 
+// BURST:
+
+
+// some structs
+
+// BE
+struct code_signature_segment_header {
+  uint32_t      magic;
+  uint32_t      length;
+  uint32_t      count;
+};
+
+// BE
+struct code_signature_section_index {
+  uint32_t      type;
+  uint32_t      offset;
+};
+
+// BE /*Version 20400*/
+struct code_directory {
+  uint32_t magic;
+  uint32_t length;
+  uint32_t version;
+  uint32_t flags;
+  uint32_t hashOffset;
+  uint32_t identifierOffset;
+  uint32_t specialSlotCount;
+  uint32_t codeSlotCount;               //32
+  uint32_t binarySizeWithoutSignature;
+  uint8_t hashSize;
+  uint8_t hashType;
+  uint8_t platform;
+  uint8_t logPageSize;
+  uint8_t padding2[24];                //64
+  uint64_t textSegmentOffset;
+  uint64_t textSegmentSize;
+  uint64_t textSegmentFlags;           //88
+};
+
+static llvm::StringRef filenameWithoutExtension(llvm::StringRef Path) {
+  Path = llvm::sys::path::filename(Path);
+  return Path.drop_back(llvm::sys::path::extension(Path).size());
+}
+
+uint8_t requirements[12] = {0xFA, 0xDE, 0x0C, 0x01, 0x00, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x00};
+uint8_t signedDataSection[8] = {0xFA, 0xDE, 0x0B, 0x01, 0x00, 0x00, 0x00, 0x08 };
+
+void MachOFileLayout::computeCodeSignSize() {
+  if (_file.isBurst) {
+    assert(88 == sizeof(code_directory));
+    auto filename = filenameWithoutExtension(_file.installName);
+    auto nameSize = filename.size() + 41;
+    auto pages = (_startOfCodeSign + 4095) / 4096;
+    auto hashSize = 32;     // SHA256
+    auto specialSlotCnt = 2;    // normal target (not bundle)
+    _signatureSectionSize = sizeof(code_directory) + nameSize + 1 + hashSize*specialSlotCnt + hashSize*pages;
+    _requirementsSize = sizeof(requirements);
+    _signedDataSize = sizeof(signedDataSection);
+
+    _sizeOfCodeSign = sizeof(code_signature_segment_header) +3 * sizeof(code_signature_section_index);
+    _sizeOfCodeSign += _signatureSectionSize;
+    _sizeOfCodeSign += _requirementsSize;
+    _sizeOfCodeSign += _signedDataSize;
+  }
+  else
+    _sizeOfCodeSign = 0;    // Not Used
+}
+// :BURST
+
 void MachOFileLayout::writeLinkEditContent() {
   if (_file.fileType == llvm::MachO::MH_OBJECT) {
     writeRelocations();
@@ -1543,11 +1684,163 @@ llvm::Error MachOFileLayout::writeBinary(StringRef path) {
     return ec;
   writeSectionContent();
   writeLinkEditContent();
+
+// BURST:
+  writeUUID();
+  writeAdHocCodeSign();
+// :BURST
+
   if (Error E = fob->commit())
     return E;
 
   return llvm::Error::success();
 }
+
+// BURST:
+void MachOFileLayout::writeUUID() { 
+  if (_file.isBurst) {
+
+    // Compute Hash then update load command (same way burst did it)
+    auto digest = llvm::MD5().hash(llvm::makeArrayRef(_buffer, _endOfSymbolStrings));
+    
+    // Fix (RFC 4122)
+    digest[6] = (digest[6] & 0x0F) | (3 << 4);
+    digest[8] = (digest[8] & 0x3F) | (0x80);
+
+    // Re-Write the command (incase we have to swap)
+    uuid_command *uuid = reinterpret_cast<uuid_command *>(_uuidCommandLoc);
+    uuid->cmd = LC_UUID;
+    uuid->cmdsize = sizeof(uuid_command);
+    for (int a = 0; a < 16; a++)
+      uuid->uuid[a] = digest[a];
+    if (_swap)
+      swapStruct(*uuid);
+
+    memcpy(_uuidDigest, digest.data(), sizeof(_uuidDigest));
+  }
+}
+
+static std::string byteToHexString(uint8_t value) { 
+  std::string result = "00"; 
+  auto nibble = value >> 4;
+  if (nibble < 10)
+    result[0] = nibble + '0';
+  else
+    result[0] = (nibble - 10) + 'a';
+  nibble = value & 0xF;
+  if (nibble < 10)
+    result[1] = nibble + '0';
+  else
+    result[1] = (nibble - 10) + 'a';
+  return result;
+}
+/*
+// Bodge to give iterator to pico
+class PtrIteratorWrapper {
+  struct Iterator {
+      Iterator(uint8_t *ptr) : m_ptr(ptr);
+
+      uint8_t &operator*() const { return *m_ptr; }
+      uint8_t *operator->() { return m_ptr; }
+      Iterator &operator++() { m_ptr++; return *this; }
+      Iterator
+    private:
+      uint8_t *m_ptr;
+  };
+};*/
+
+void MachOFileLayout::writeAdHocCodeSign() { 
+  if (_sizeOfCodeSign) 
+  {
+    auto identifier = filenameWithoutExtension(_file.installName).str();
+    identifier += "-55554944";
+    for (int a=0;a<16;a++) {
+      identifier += byteToHexString(_uuidDigest[a]);
+    }
+
+    uint8_t *ptr = &_buffer[_startOfCodeSign];
+
+    // TEMP just so we know what we are working with
+    for (uint32_t a=0;a<_sizeOfCodeSign;a++) {
+      *ptr++ = 0xFF;
+    }
+
+    auto hashType = 2;          // Sha256
+    auto specialSlotCnt = 2;    // normal target (not bundle)
+    auto pages = (_startOfCodeSign + 4095) / 4096;
+    auto hashSize = 32;     // SHA256
+
+    ptr = &_buffer[_startOfCodeSign];
+    auto signatureHeader = reinterpret_cast<code_signature_segment_header *>(ptr);
+    signatureHeader->magic = byte_swap<uint32_t, llvm::support::big>(0xFADE0CC0);       // EmbeddedSignature
+    signatureHeader->length = byte_swap<uint32_t, llvm::support::big>(_sizeOfCodeSign);
+    signatureHeader->count = byte_swap<uint32_t, llvm::support::big>(3);
+    ptr += sizeof(code_signature_segment_header);
+    auto sectionIndices = reinterpret_cast<code_signature_section_index *>(ptr);
+    ptr += sizeof(code_signature_section_index) * 3;
+    auto sectionOffset = sizeof(code_signature_segment_header) +
+                         sizeof(code_signature_section_index) * 3;
+    sectionIndices[0].type = byte_swap<uint32_t, llvm::support::big>(0);                // CodeDirectory
+    sectionIndices[0].offset = byte_swap<uint32_t, llvm::support::big>(sectionOffset);
+    sectionOffset += _signatureSectionSize;
+    sectionIndices[1].type = byte_swap<uint32_t, llvm::support::big>(2);                // Requirements
+    sectionIndices[1].offset = byte_swap<uint32_t, llvm::support::big>(sectionOffset);
+    sectionOffset += _requirementsSize;
+    sectionIndices[2].type = byte_swap<uint32_t, llvm::support::big>(0x10000);          // Signed Data
+    sectionIndices[2].offset = byte_swap<uint32_t, llvm::support::big>(sectionOffset);
+    
+    auto signatureCommand = reinterpret_cast<code_directory *>(ptr);
+    memset(signatureCommand, 0, sizeof(code_directory));
+    ptr += sizeof(code_directory);
+
+    signatureCommand->magic = byte_swap<uint32_t, llvm::support::big>(0xFADE0C02);      // CodeDirectory Signature
+    signatureCommand->length = byte_swap<uint32_t, llvm::support::big>(_signatureSectionSize);
+    signatureCommand->version = byte_swap<uint32_t, llvm::support::big>(0x20400);       // Easiest version to support
+    signatureCommand->flags = byte_swap<uint32_t, llvm::support::big>(2);               // AdHoc Signature
+
+    signatureCommand->identifierOffset = byte_swap<uint32_t, llvm::support::big>(sizeof(code_directory));
+    auto hashOffset = _signatureSectionSize - (pages * hashSize);
+    signatureCommand->hashOffset = byte_swap<uint32_t, llvm::support::big>(hashOffset);
+    signatureCommand->specialSlotCount = byte_swap<uint32_t, llvm::support::big>(specialSlotCnt);
+    signatureCommand->codeSlotCount = byte_swap<uint32_t, llvm::support::big>(pages);
+    signatureCommand->binarySizeWithoutSignature = byte_swap<uint32_t, llvm::support::big>(_startOfCodeSign);
+    signatureCommand->hashSize = hashSize;
+    signatureCommand->hashType = hashType;
+    signatureCommand->logPageSize = 12;                                                 // 1<<12 == 4096
+    signatureCommand->textSegmentOffset = byte_swap<uint64_t, llvm::support::big>(_textSegmentOffset);
+    signatureCommand->textSegmentSize = byte_swap<uint64_t, llvm::support::big>(_textSegmentSize);
+    signatureCommand->textSegmentFlags = byte_swap<uint64_t, llvm::support::big>(0);    // not bundle
+
+    memcpy(ptr, identifier.c_str(), identifier.length());
+    ptr += identifier.length();
+    *ptr++ = 0;
+    // First is hash for requirements (TBF this is constant, but helps verification that i got the order correct)
+
+    std::vector<uint8_t> s(picosha2::k_digest_size);
+    picosha2::hash256(std::begin(requirements),std::end(requirements), s);
+    for (int a = 0; a < hashSize; a++)
+      *ptr++ = s[a];
+    // Write the next hash as empty, its unused but its space must be allocated
+    memset(ptr, 0x0, hashSize);
+    ptr += hashSize;
+    // Now the hashes for each page
+    auto offset = 0;
+    for (uint32_t bb=0;bb<pages;bb++) {
+      size_t blockSize = _startOfCodeSign - offset >= 4096 ? 4096 : _startOfCodeSign - offset;
+      auto container = llvm::makeArrayRef(&_buffer[offset], blockSize);
+      picosha2::hash256(container, s);
+      for (int a = 0; a < hashSize; a++)
+        *ptr++ = s[a];
+      offset += blockSize;
+    }
+    // Now the requirements and signedData sections
+    memcpy(ptr, requirements, sizeof(requirements));
+    ptr += sizeof(requirements);
+    memcpy(ptr, signedDataSection, sizeof(signedDataSection));
+    ptr += sizeof(signedDataSection);
+  }
+}
+// :BURST
 
 /// Takes in-memory normalized view and writes a mach-o object file.
 llvm::Error writeBinary(const NormalizedFile &file, StringRef path) {

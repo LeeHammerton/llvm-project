@@ -248,3 +248,9 @@ def objc_gc : Flag<["-"], "objc_gc">,
      HelpText<"Unsupported ObjC GC option">, Group<grp_obsolete>;
 def objc_gc_only : Flag<["-"], "objc_gc_only">,
      HelpText<"Unsupported ObjC GC option">, Group<grp_obsolete>;
+
+// BURST:
+def burst : Flag<["-"], "burst">,
+     HelpText<"Enable burst mode">;
+// :BURST
+

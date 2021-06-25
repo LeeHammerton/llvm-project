@@ -423,6 +423,12 @@ bool MachOLinkingContext::addEntryPointLoadCommand() const {
   return false;
 }
 
+// BURST: 
+bool MachOLinkingContext::addBurstLoadCommands() const {
+    return _burst; 
+}
+// :BURST
+
 bool MachOLinkingContext::addUnixThreadLoadCommand() const {
   switch (_outputMachOType) {
   case MH_EXECUTE:

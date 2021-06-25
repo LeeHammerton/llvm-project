@@ -1611,6 +1611,9 @@ normalizedFromAtoms(const lld::File &atomFile,
 
   normFile.sdkVersion = context.sdkVersion();
   normFile.sourceVersion = context.sourceVersion();
+// BURST:
+  normFile.isBurst = context.addBurstLoadCommands();
+// :BURST
 
   if (context.generateVersionLoadCommand() &&
       context.os() != MachOLinkingContext::OS::unknown)

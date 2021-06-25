@@ -429,6 +429,10 @@ bool parse(llvm::ArrayRef<const char *> args, MachOLinkingContext &ctx) {
     // No min-os version on command line, check environment variables
   }
 
+  // BURST: 
+  ctx.setBurst(parsedArgs.hasArg(OPT_burst));
+  // :BURST
+
   // Handle export_dynamic
   // FIXME: Should we warn when this applies to something other than a static
   // executable or dylib?  Those are the only cases where this has an effect.

@@ -801,6 +801,15 @@ struct linkedit_data_command {
   uint32_t datasize;
 };
 
+// BURST:
+struct codesign_command {
+  uint32_t cmd;
+  uint32_t cmdsize;
+  uint32_t dataoff;
+  uint32_t datasize;
+};
+// :BURST
+
 struct data_in_code_entry {
   uint32_t offset;
   uint16_t length;
@@ -1285,6 +1294,15 @@ inline void swapStruct(linkedit_data_command &C) {
   sys::swapByteOrder(C.dataoff);
   sys::swapByteOrder(C.datasize);
 }
+
+// BURST:
+inline void swapStruct(codesign_command &C) {
+  sys::swapByteOrder(C.cmd);
+  sys::swapByteOrder(C.cmdsize);
+  sys::swapByteOrder(C.dataoff);
+  sys::swapByteOrder(C.datasize);
+}
+// :BURST
 
 inline void swapStruct(linker_option_command &C) {
   sys::swapByteOrder(C.cmd);
