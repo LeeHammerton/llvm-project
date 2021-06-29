@@ -719,7 +719,11 @@ llvm::Error MachOFileLayout::writeSegmentLoadCommands(uint8_t *&lc) {
       uint8_t *next = lc + cmd->cmdsize;
       setString16("__LINKEDIT", cmd->segname);
       cmd->vmaddr   = _addressOfLinkEdit;
-      cmd->vmsize   = llvm::alignTo(linkeditSize, _file.pageSize);
+      if (_file.isBurst) {
+        cmd->vmsize = llvm::alignTo(linkeditSize, 4096);
+      } else {
+        cmd->vmsize = llvm::alignTo(linkeditSize, _file.pageSize);
+      }
       cmd->fileoff  = _startOfLinkEdit;
       cmd->filesize = linkeditSize;
       cmd->initprot = seg.init_access;
