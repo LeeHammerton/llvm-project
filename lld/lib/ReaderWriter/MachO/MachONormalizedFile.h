@@ -261,6 +261,8 @@ struct NormalizedFile {
   std::vector<uint8_t>        functionStarts;
   std::vector<DataInCode>     dataInCode;
 
+  uint32_t                    headerPad = 16 + 24; // Space for UUID + CODESIGN
+
   // TODO:
   // code-signature
   // split-seg-info

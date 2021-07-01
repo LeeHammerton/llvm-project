@@ -193,6 +193,7 @@ private:
   uint32_t              _startOfLoadCommands;
   uint32_t              _countOfLoadCommands;
   uint32_t              _endOfLoadCommands;
+  uint32_t              _endOfHeader;
   uint32_t              _startOfRelocations;
   uint32_t              _startOfFunctionStarts;
   uint32_t              _startOfDataInCode;
@@ -248,7 +249,7 @@ uint32_t MachOFileLayout::pointerAlign(uint32_t value) {
 
 
 size_t MachOFileLayout::headerAndLoadCommandsSize() const {
-  return _endOfLoadCommands;
+  return _endOfHeader;
 }
 
 MachOFileLayout::MachOFileLayout(const NormalizedFile &file,
@@ -281,8 +282,9 @@ MachOFileLayout::MachOFileLayout(const NormalizedFile &file,
       _endOfLoadCommands += sizeof(linkedit_data_command);
       _countOfLoadCommands++;
     }
+    _endOfHeader = _endOfLoadCommands;
     // Assign file offsets to each section.
-    _startOfSectionsContent = _endOfLoadCommands;
+    _startOfSectionsContent = _endOfHeader;
     unsigned relocCount = 0;
     uint64_t offset = _startOfSectionsContent;
     for (const Section &sect : file.sections) {
@@ -319,6 +321,7 @@ MachOFileLayout::MachOFileLayout(const NormalizedFile &file,
       << "  startOfLoadCommands=" << _startOfLoadCommands << "\n"
       << "  countOfLoadCommands=" << _countOfLoadCommands << "\n"
       << "  endOfLoadCommands=" << _endOfLoadCommands << "\n"
+      << "  endOfLoadCommands=" << _endOfHeader << "\n"
       << "  startOfRelocations=" << _startOfRelocations << "\n"
       << "  startOfSymbols=" << _startOfSymbols << "\n"
       << "  startOfSymbolStrings=" << _startOfSymbolStrings << "\n"
@@ -330,6 +333,8 @@ MachOFileLayout::MachOFileLayout(const NormalizedFile &file,
     _endOfLoadCommands = _startOfLoadCommands
                           + loadCommandsSize(_countOfLoadCommands,
                                              alwaysIncludeFunctionStarts);
+
+    _endOfHeader = _endOfLoadCommands + _file.headerPad;
 
     // Assign section file offsets.
     buildFileOffsets();
@@ -360,6 +365,7 @@ MachOFileLayout::MachOFileLayout(const NormalizedFile &file,
       << "  startOfLoadCommands=" << _startOfLoadCommands << "\n"
       << "  countOfLoadCommands=" << _countOfLoadCommands << "\n"
       << "  endOfLoadCommands=" << _endOfLoadCommands << "\n"
+      << "  endOfLoadCommands=" << _endOfHeader << "\n"
       << "  startOfLinkEdit=" << _startOfLinkEdit << "\n"
       << "  startOfRebaseInfo=" << _startOfRebaseInfo << "\n"
       << "  endOfRebaseInfo=" << _endOfRebaseInfo << "\n"
@@ -628,7 +634,7 @@ llvm::Error MachOFileLayout::writeSingleSegmentLoadCommand(uint8_t *&lc) {
   memset(seg->segname, 0, 16);
   seg->flags = 0;
   seg->vmaddr = 0;
-  seg->fileoff = _endOfLoadCommands;
+  seg->fileoff = _endOfHeader;
   seg->maxprot = VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE;
   seg->initprot = VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE;
   seg->nsects = _file.sections.size();
@@ -1013,6 +1019,7 @@ llvm::Error MachOFileLayout::writeLoadCommands() {
       lc += sizeof(linkedit_data_command);
     }
   }
+
   assert(lc == &_buffer[_endOfLoadCommands]);
   return llvm::Error::success();
 }
@@ -1025,7 +1032,7 @@ void MachOFileLayout::writeSectionContent() {
     if (s.content.empty())
       continue;
     uint32_t offset = _sectInfo[&s].fileOffset;
-    assert(offset >= _endOfLoadCommands);
+    assert(offset >= _endOfHeader);
     uint8_t *p = &_buffer[offset];
     memcpy(p, &s.content[0], s.content.size());
     p += s.content.size();
